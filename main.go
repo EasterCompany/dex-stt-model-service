@@ -58,33 +58,39 @@ MODEL_SIZE = "large-v3-turbo"
 # Dexter standard model path
 MODEL_DIR = os.path.expanduser("~/Dexter/models/whisper/large-v3-turbo")
 
+# Device Configuration
+# Default to "cpu" to save VRAM, but allow override via env var
+DEVICE = os.getenv("DEX_STT_DEVICE", "cpu")
+logger.info(f"STT Service configured to use device: {DEVICE}")
+
 app = FastAPI(title="Dexter STT Service", version="1.0.0")
 
 def load_model():
     global model
     logger.info(f"Loading Whisper model ({MODEL_SIZE}) from {MODEL_DIR}...")
     
-    device = "cuda"
-    compute_type = "float16"
+    # Configure compute type based on device
+    if DEVICE == "cuda":
+        compute_type = "float16"
+    else:
+        compute_type = "int8" # Best for CPU
     
     try:
         # Check if model exists locally
         if not os.path.exists(MODEL_DIR) or not os.listdir(MODEL_DIR):
             logger.info("Model not found locally. It will be downloaded by faster-whisper.")
-            # We let faster-whisper handle the download to the cache dir if not present,
-            # or we could enforce it. For now, let's point to the dir.
-            # If the dir is empty, faster-whisper might fail if we pass it as a path.
-            # Dex CLI's 'dex whisper init' handles the download usually.
             pass
 
         try:
-            model = WhisperModel(MODEL_DIR, device=device, compute_type=compute_type)
-            logger.info("Initialized Whisper on GPU (CUDA)")
+            model = WhisperModel(MODEL_DIR, device=DEVICE, compute_type=compute_type)
+            logger.info(f"Initialized Whisper on {DEVICE.upper()} with {compute_type} precision")
         except Exception as e:
-            logger.warning(f"CUDA initialization failed ({e}), falling back to CPU...")
-            device = "cpu"
-            compute_type = "int8"
-            model = WhisperModel(MODEL_DIR, device=device, compute_type=compute_type)
+            if DEVICE == "cuda":
+                logger.warning(f"CUDA initialization failed ({e}), falling back to CPU...")
+                model = WhisperModel(MODEL_DIR, device="cpu", compute_type="int8")
+                logger.info("Initialized Whisper on CPU (Fallback)")
+            else:
+                raise e
             
         logger.info("Whisper model loaded successfully.")
     except Exception as e:
