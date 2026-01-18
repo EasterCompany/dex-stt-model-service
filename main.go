@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -286,6 +287,22 @@ func main() {
 		log.Fatalf("Failed to write main.py: %v", err)
 	}
 
+	// Load options.json to get configuration
+	device := "cpu" // Default
+	optionsPath := filepath.Join(homeDir, "Dexter", "config", "options.json")
+	if data, err := os.ReadFile(optionsPath); err == nil {
+		var opts struct {
+			Services map[string]map[string]interface{} `json:"services"`
+		}
+		if err := json.Unmarshal(data, &opts); err == nil {
+			if svc, ok := opts.Services["stt"]; ok {
+				if val, ok := svc["device"].(string); ok {
+					device = val
+				}
+			}
+		}
+	}
+
 	// Use shared Dexter Python 3.10 environment
 	pythonEnvDir := filepath.Join(homeDir, "Dexter", "python3.10")
 	pythonBin := filepath.Join(pythonEnvDir, "bin", "python")
@@ -335,6 +352,7 @@ func main() {
 		fmt.Sprintf("DEX_BUILD_YEAR=%s", buildYear),
 		fmt.Sprintf("DEX_ARCH=%s", arch),
 		fmt.Sprintf("DEX_BUILD_HASH=%s", buildHash),
+		fmt.Sprintf("DEX_STT_DEVICE=%s", device),
 	)
 
 	pythonCmd.Stdout = os.Stdout
