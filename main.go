@@ -35,7 +35,7 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Form, Request
 from pydantic import BaseModel
 import redis
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, download_model
 
 # Force standard streams to be unbuffered
 sys.stdout.reconfigure(line_buffering=True)
@@ -79,8 +79,17 @@ def load_model():
     try:
         # Check if model exists locally
         if not os.path.exists(MODEL_DIR) or not os.listdir(MODEL_DIR):
-            logger.info("Model not found locally. It will be downloaded by faster-whisper.")
-            pass
+            logger.info("Model not found locally. Downloading...")
+            # Use specific high-quality conversion
+            model_id = "deepdml/faster-whisper-large-v3-turbo-ct2"
+            try:
+                download_model(model_id, output_dir=MODEL_DIR)
+                logger.info("Model download complete.")
+            except Exception as e:
+                logger.error(f"Failed to download model: {e}")
+                # Try falling back to default large-v3 if custom fails
+                logger.info("Attempting fallback to default large-v3...")
+                download_model("large-v3", output_dir=MODEL_DIR)
 
         try:
             model = WhisperModel(MODEL_DIR, device=DEVICE, compute_type=compute_type)
