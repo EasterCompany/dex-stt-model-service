@@ -166,6 +166,7 @@ async def service_status():
 
 class TranscribeRequest(BaseModel):
     redis_key: Optional[str] = None
+    file_path: Optional[str] = None
 
 @app.post("/transcribe")
 async def transcribe(
@@ -182,27 +183,43 @@ async def transcribe(
     audio_source = None
     cleanup_path = None
     r_key = None
+    f_path = None
 
-    # 1. Try to extract redis_key from various sources
+    # 1. Try to extract params from various sources
     # Check JSON body first
     if request.headers.get("content-type") == "application/json":
         try:
             body = await request.json()
             r_key = body.get("redis_key")
+            f_path = body.get("file_path")
         except:
             pass
     
     # Check Form data if not in JSON
-    if not r_key:
+    if not r_key and not f_path:
         try:
             form = await request.form()
             r_key = form.get("redis_key")
+            f_path = form.get("file_path")
         except:
             pass
 
     try:
-        # 2. Determine Source
-        if file:
+        # 2. Determine Source (Priority: Local Path > Upload > Redis)
+        if f_path:
+            # Validate path exists and is safe (basic check)
+            if os.path.exists(f_path):
+                audio_source = f_path
+                # We do NOT cleanup external paths by default, assumes caller handles it or it's a temp file we own?
+                # Actually, for this optimization, the producer creates it in tmp, consumer reads it.
+                # Who deletes it? Usually the consumer if it's a hand-off.
+                # Let's assume we clean it up to prevent disk fill-up since it's a temp hand-off.
+                cleanup_path = f_path
+            else:
+                logger.warning(f"Provided file_path not found: {f_path}")
+                # Fallthrough to other methods if valid
+        
+        if not audio_source and file:
             # Save to temp file
             temp_filename = f"upload_{int(time.time())}_{file.filename}"
             temp_path = os.path.join("/tmp", temp_filename)
@@ -210,7 +227,8 @@ async def transcribe(
                 shutil.copyfileobj(file.file, buffer)
             audio_source = temp_path
             cleanup_path = temp_path
-        elif r_key:
+            
+        if not audio_source and r_key:
             if not redis_client:
                 raise HTTPException(status_code=500, detail="Redis unavailable")
             
@@ -218,15 +236,16 @@ async def transcribe(
             if not audio_data:
                 raise HTTPException(status_code=404, detail=f"Redis key not found: {r_key}")
             
-            # Sanitize key for filename (Redis keys contain colons which are bad for filenames)
+            # Sanitize key for filename
             safe_key = "".join([c if c.isalnum() or c in "._-" else "_" for c in r_key])
             temp_path = os.path.join("/tmp", f"stt_{safe_key}.wav")
             with open(temp_path, "wb") as f:
                 f.write(audio_data)
             audio_source = temp_path
             cleanup_path = temp_path
-        else:
-            raise HTTPException(status_code=400, detail="No audio file or redis_key provided")
+            
+        if not audio_source:
+            raise HTTPException(status_code=400, detail="No audio source provided (file_path, file, or redis_key)")
 
         # 3. Transcribe
         logger.info(f"Transcribing {audio_source}...")
