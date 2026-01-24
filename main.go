@@ -120,9 +120,16 @@ func buildWhisper(binDir, destBin string) error {
 	buildDir := filepath.Join(tmpDir, "build")
 	_ = os.MkdirAll(buildDir, 0755)
 
-	log.Println("Configuring whisper-cli with CMake (Static Build)...")
-	// -DBUILD_SHARED_LIBS=OFF to ensure libwhisper is baked into the binary
-	cmakeArgs := []string{"..", "-DWHISPER_BUILD_EXAMPLES=ON", "-DBUILD_SHARED_LIBS=OFF"}
+	log.Println("Configuring whisper-cli with CMake (Static Strategy)...")
+	// Aggressively disable shared libs to ensure a standalone binary
+	cmakeArgs := []string{
+		"..",
+		"-DWHISPER_BUILD_EXAMPLES=ON",
+		"-DBUILD_SHARED_LIBS=OFF",
+		"-DGGML_SHARED=OFF",
+		"-DWHISPER_ALL_EXTERNAL=OFF",
+	}
+
 	if _, err := exec.LookPath("nvcc"); err == nil {
 		log.Println("NVCC found, enabling CUDA support.")
 		cmakeArgs = append(cmakeArgs, "-DWHISPER_CUDA=ON")
@@ -148,17 +155,25 @@ func buildWhisper(binDir, destBin string) error {
 	// Move binary (use 'mv' to handle cross-device links)
 	_ = os.MkdirAll(binDir, 0755)
 	sourceBin := filepath.Join(buildDir, "bin", "whisper-cli")
+
+	// Fallback check: if bin/whisper-cli doesn't exist, search for it
+	if _, err := os.Stat(sourceBin); os.IsNotExist(err) {
+		findBin := exec.Command("find", buildDir, "-name", "whisper-cli", "-type", "f")
+		out, _ := findBin.Output()
+		if len(out) > 0 {
+			sourceBin = strings.TrimSpace(string(out))
+		}
+	}
+
 	mvCmd := exec.Command("mv", sourceBin, destBin)
 	if err := mvCmd.Run(); err != nil {
 		return fmt.Errorf("failed to move binary to destination: %w", err)
 	}
 
-	// Robustly find and copy all shared libraries (including symlinks)
-	log.Println("Capturing shared libraries...")
-	findCmd := fmt.Sprintf("find %s -name '*.so*' -exec cp -Pd {} %s \\;", buildDir, binDir)
-	if err := exec.Command("bash", "-c", findCmd).Run(); err != nil {
-		log.Printf("Warning: failed to copy some shared libraries: %v", err)
-	}
+	// Robustly find and copy all shared libraries (just in case something was linked dynamically)
+	log.Println("Capturing any built shared libraries...")
+	findLibsCmd := fmt.Sprintf(`find %s -name '*.so*' -exec cp -Pd {} %s \;`, tmpDir, binDir)
+	_ = exec.Command("bash", "-c", findLibsCmd).Run()
 
 	return nil
 }
