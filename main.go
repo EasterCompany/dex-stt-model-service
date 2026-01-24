@@ -120,15 +120,10 @@ func buildWhisper(binDir, destBin string) error {
 	buildDir := filepath.Join(tmpDir, "build")
 	_ = os.MkdirAll(buildDir, 0755)
 
-	log.Println("Configuring whisper-cli with CMake (Standalone Strategy)...")
-	// Attempt to force static build while ensuring examples are built
+	log.Println("Configuring whisper-cli with CMake...")
 	cmakeArgs := []string{
 		"..",
 		"-DWHISPER_BUILD_EXAMPLES=ON",
-		"-DBUILD_SHARED_LIBS=OFF",
-		"-DGGML_STATIC=ON",
-		"-DGGML_SHARED=OFF",
-		"-DWHISPER_ALL_EXTERNAL=OFF",
 		"-DCMAKE_BUILD_TYPE=Release",
 	}
 
@@ -154,7 +149,6 @@ func buildWhisper(binDir, destBin string) error {
 	// Move binary (use 'mv' to handle cross-device links)
 	_ = os.MkdirAll(binDir, 0755)
 
-	// Search for the binary in the build directory
 	findBin := exec.Command("find", buildDir, "-name", "whisper-cli", "-type", "f")
 	binPathBytes, _ := findBin.Output()
 	sourceBin := strings.TrimSpace(string(binPathBytes))
@@ -169,13 +163,20 @@ func buildWhisper(binDir, destBin string) error {
 		return fmt.Errorf("failed to move binary to destination: %w", err)
 	}
 
-	// Robustly find and copy all shared libraries (just in case something was linked dynamically)
-	// Even if we requested static, dependencies might have built as shared
-	log.Println("Capturing any built shared libraries from the entire build tree...")
-	findLibsCmd := fmt.Sprintf(`find %s -name "*.so*" -exec cp -Pd {} %s \;`, tmpDir, binDir)
-	err = exec.Command("bash", "-c", findLibsCmd).Run()
-	if err != nil {
-		log.Printf("Warning: capture libs command reported error (may be fine if none exist): %v", err)
+	// Capture all shared libraries from the build tree
+	log.Println("Capturing built shared libraries...")
+	findLibs := exec.Command("find", tmpDir, "-name", "*.so*")
+	libsBytes, _ := findLibs.Output()
+	libs := strings.Split(string(libsBytes), "\n")
+
+	for _, lib := range libs {
+		lib = strings.TrimSpace(lib)
+		if lib == "" {
+			continue
+		}
+		dest := filepath.Join(binDir, filepath.Base(lib))
+		log.Printf("Copying library: %s -> %s", lib, dest)
+		_ = exec.Command("cp", "-Pd", lib, dest).Run()
 	}
 
 	return nil
@@ -206,16 +207,13 @@ func handleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Support both multipart and JSON (for redis_key/file_path)
 	var audioPath string
-
 	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
 		err := r.ParseMultipartForm(10 << 20)
 		if err != nil {
 			http.Error(w, "Parse error", http.StatusBadRequest)
 			return
 		}
-
 		filePath := r.FormValue("file_path")
 		if filePath != "" {
 			audioPath = filePath
@@ -235,10 +233,9 @@ func handleTranscribe(w http.ResponseWriter, r *http.Request) {
 	whisperBin := filepath.Join(binDir, "whisper-cli")
 	modelPath := filepath.Join(home, "Dexter", "models", "whisper", "ggml-medium-distil.bin")
 
-	// whisper-cli -m <model> -f <file> -nt (no timestamps)
 	cmd := exec.Command(whisperBin, "-m", modelPath, "-f", audioPath, "-nt")
 
-	// CRITICAL: Ensure we check local bin for shared libraries
+	// Ensure we check local bin for shared libraries
 	cmd.Env = append(os.Environ(), fmt.Sprintf("LD_LIBRARY_PATH=%s:%s", binDir, os.Getenv("LD_LIBRARY_PATH")))
 
 	var out bytes.Buffer
@@ -252,10 +249,8 @@ func handleTranscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text := strings.TrimSpace(out.String())
-
 	resp := TranscribeResponse{
-		Text:        text,
+		Text:        strings.TrimSpace(out.String()),
 		Language:    "en",
 		Probability: 1.0,
 	}
