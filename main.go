@@ -31,6 +31,7 @@ import psutil
 import json
 import shutil
 import contextlib
+import gc
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Form, Request
 from pydantic import BaseModel
@@ -69,6 +70,9 @@ logger.info(f"STT Service configured to use device: {DEVICE}")
 
 def load_model():
     global model
+    if model is not None:
+        return
+
     logger.info(f"Loading Whisper model ({MODEL_SIZE}) from {MODEL_DIR}...")
     
     # Configure compute type based on device
@@ -106,6 +110,21 @@ def load_model():
         logger.error(f"FATAL: Failed to load Whisper model: {e}")
         model = None
 
+def unload_model():
+    global model
+    if model is not None:
+        logger.info("Unloading STT model...")
+        del model
+        model = None
+        gc.collect()
+        if DEVICE == "cuda":
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except:
+                pass
+        logger.info("STT model unloaded.")
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global redis_client
@@ -117,7 +136,20 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to connect to Redis: {e}")
         redis_client = None
         
-    load_model()
+    # Start unloaded to save VRAM until needed?
+    # Or load on startup? 
+    # User requested: "when not in voice mode ... unloaded".
+    # Default state is likely not in voice mode.
+    # So we should NOT load_model() here by default, or unload immediately?
+    # Or rely on Orchestrator to hibernate.
+    # Let's load it to ensure it works, then Orchestrator can hibernate.
+    # Or better: Lazy loading.
+    # But lazy loading adds latency to first request.
+    # User said "latency is top priority" IN VOICE MODE.
+    # So Voice Mode activation should trigger wakeup (pre-load).
+    # I'll stick to lazy loading logic in transcribe, but allow explicit wakeup.
+    
+    # load_model() # Disabled for lazy load / orchestration control
     yield
     if redis_client:
         redis_client.close()
@@ -127,9 +159,7 @@ app = FastAPI(title="Dexter STT Service", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():
-    if model is None:
-        return {"status": "error", "message": "Model not loaded"}
-    return {"status": "ok", "model": MODEL_SIZE}
+    return {"status": "ok", "model": MODEL_SIZE, "loaded": model is not None}
 
 @app.get("/service")
 async def service_status():
@@ -177,8 +207,9 @@ async def service_status():
             }
         },
         "health": {
-            "status": "ok" if model is not None else "error",
-            "uptime": uptime_str
+            "status": "ok",
+            "uptime": uptime_str,
+            "loaded": model is not None
         },
         "metrics": {
             "cpu": { "avg": process.cpu_percent(interval=None) },
@@ -189,6 +220,17 @@ async def service_status():
 class TranscribeRequest(BaseModel):
     redis_key: Optional[str] = None
     file_path: Optional[str] = None
+
+@app.post("/hibernate")
+async def hibernate():
+    unload_model()
+    return {"status": "ok", "message": "Hibernated"}
+
+@app.post("/wakeup")
+async def wakeup():
+    if model is None:
+        load_model()
+    return {"status": "ok", "message": "Ready"}
 
 @app.post("/transcribe")
 async def transcribe(
@@ -326,7 +368,7 @@ func main() {
 		if c == "unknown" || c == "" {
 			c = os.Getenv("DEX_COMMIT")
 		}
-		fmt.Printf("%s.%s.%s.%s.%s.%s.%s\n", v, b, c, buildDate, buildYear, buildHash, arch)
+		fmt.Printf("%s.%s.%s.%s.%s\n", v, b, c, buildDate, arch)
 		return
 	}
 
