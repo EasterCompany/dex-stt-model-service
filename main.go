@@ -153,11 +153,11 @@ func buildWhisper(binDir, destBin string) error {
 		return fmt.Errorf("failed to move binary to destination: %w", err)
 	}
 
-	// Also move any .so files just in case static build didn't catch everything (like ggml backend)
-	files, _ := filepath.Glob(filepath.Join(buildDir, "**", "*.so*"))
-	for _, f := range files {
-		dest := filepath.Join(binDir, filepath.Base(f))
-		_ = exec.Command("cp", "-d", f, dest).Run()
+	// Robustly find and copy all shared libraries (including symlinks)
+	log.Println("Capturing shared libraries...")
+	findCmd := fmt.Sprintf("find %s -name '*.so*' -exec cp -Pd {} %s \\;", buildDir, binDir)
+	if err := exec.Command("bash", "-c", findCmd).Run(); err != nil {
+		log.Printf("Warning: failed to copy some shared libraries: %v", err)
 	}
 
 	return nil
