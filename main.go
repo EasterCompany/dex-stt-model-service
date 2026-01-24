@@ -87,7 +87,7 @@ func ensureAssets() error {
 
 	// 1. whisper-cli binary
 	if _, err := os.Stat(whisperBin); os.IsNotExist(err) {
-		log.Println("Whisper binary missing. Building from source...")
+		log.Println("Whisper binary missing. Building from source via CMake...")
 		if err := buildWhisper(binDir, whisperBin); err != nil {
 			return fmt.Errorf("failed to build whisper: %w", err)
 		}
@@ -117,24 +117,41 @@ func buildWhisper(binDir, destBin string) error {
 		return err
 	}
 
-	log.Println("Compiling whisper-cli (CUDA enabled if detected)...")
-	// Try building with CUDA support if nvcc is present
-	makeArgs := []string{"-C", tmpDir, "-j", fmt.Sprintf("%d", runtime.NumCPU()), "main"}
+	buildDir := filepath.Join(tmpDir, "build")
+	_ = os.MkdirAll(buildDir, 0755)
+
+	log.Println("Configuring whisper-cli with CMake...")
+	cmakeArgs := []string{"..", "-DWHISPER_BUILD_EXAMPLES=ON"}
 	if _, err := exec.LookPath("nvcc"); err == nil {
 		log.Println("NVCC found, enabling CUDA support.")
-		_ = os.Setenv("GGML_CUDA", "1")
+		cmakeArgs = append(cmakeArgs, "-DWHISPER_CUDA=ON")
 	}
 
-	makeCmd := exec.Command("make", makeArgs...)
-	makeCmd.Stdout = os.Stdout
-	makeCmd.Stderr = os.Stderr
-	if err := makeCmd.Run(); err != nil {
-		return err
+	configCmd := exec.Command("cmake", cmakeArgs...)
+	configCmd.Dir = buildDir
+	configCmd.Stdout = os.Stdout
+	configCmd.Stderr = os.Stderr
+	if err := configCmd.Run(); err != nil {
+		return fmt.Errorf("cmake config failed: %w", err)
 	}
 
-	// Move binary
+	log.Println("Building whisper-cli...")
+	buildCmd := exec.Command("cmake", "--build", ".", "--config", "Release", "--target", "whisper-cli", "-j", fmt.Sprintf("%d", runtime.NumCPU()))
+	buildCmd.Dir = buildDir
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("cmake build failed: %w", err)
+	}
+
+	// Move binary (use 'mv' to handle cross-device links between /tmp and /home)
 	_ = os.MkdirAll(binDir, 0755)
-	return os.Rename(filepath.Join(tmpDir, "main"), destBin)
+	sourceBin := filepath.Join(buildDir, "bin", "whisper-cli")
+	mvCmd := exec.Command("mv", sourceBin, destBin)
+	if err := mvCmd.Run(); err != nil {
+		return fmt.Errorf("failed to move binary to destination: %w", err)
+	}
+	return nil
 }
 
 func downloadFile(url, dest string) error {
