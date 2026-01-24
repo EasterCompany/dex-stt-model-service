@@ -85,9 +85,15 @@ func ensureAssets() error {
 	modelsDir := filepath.Join(home, "Dexter", "models", "whisper")
 	modelPath := filepath.Join(modelsDir, "ggml-medium-distil.bin")
 
-	// 1. whisper-cli binary
-	if _, err := os.Stat(whisperBin); os.IsNotExist(err) {
-		log.Println("Whisper binary missing. Building from source via CMake...")
+	// Check if binary and essential shared libs exist
+	libsExist := true
+	if _, err := os.Stat(filepath.Join(binDir, "libwhisper.so.1")); os.IsNotExist(err) {
+		libsExist = false
+	}
+
+	// 1. whisper-cli binary and libs
+	if _, err := os.Stat(whisperBin); os.IsNotExist(err) || !libsExist {
+		log.Println("Whisper assets missing or incomplete. Building from source...")
 		if err := buildWhisper(binDir, whisperBin); err != nil {
 			return fmt.Errorf("failed to build whisper: %w", err)
 		}
@@ -134,33 +140,34 @@ func buildWhisper(binDir, destBin string) error {
 
 	configCmd := exec.Command("cmake", cmakeArgs...)
 	configCmd.Dir = buildDir
-	configOutput, _ := configCmd.CombinedOutput()
-	log.Printf("CMake Config Output:\n%s", string(configOutput))
+	if out, err := configCmd.CombinedOutput(); err != nil {
+		log.Printf("CMake Config failed: %v\n%s", err, string(out))
+		return err
+	}
 
 	log.Println("Building whisper-cli...")
 	buildCmd := exec.Command("cmake", "--build", ".", "--config", "Release", "--target", "whisper-cli", "-j", fmt.Sprintf("%d", runtime.NumCPU()))
 	buildCmd.Dir = buildDir
-	buildOutput, err := buildCmd.CombinedOutput()
-	if err != nil {
-		log.Printf("Build failed:\n%s", string(buildOutput))
-		return fmt.Errorf("cmake build failed: %w", err)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		log.Printf("Build failed: %v\n%s", err, string(out))
+		return err
 	}
 
-	// Move binary (use 'mv' to handle cross-device links)
+	// Move binary
 	_ = os.MkdirAll(binDir, 0755)
-
 	findBin := exec.Command("find", buildDir, "-name", "whisper-cli", "-type", "f")
 	binPathBytes, _ := findBin.Output()
 	sourceBin := strings.TrimSpace(string(binPathBytes))
 
 	if sourceBin == "" {
-		return fmt.Errorf("could not find whisper-cli binary in build directory")
+		return fmt.Errorf("could not find whisper-cli binary")
 	}
 
-	log.Printf("Found whisper-cli at: %s", sourceBin)
+	log.Printf("Installing binary: %s", destBin)
+	_ = os.Remove(destBin) // Remove old if exists
 	mvCmd := exec.Command("mv", sourceBin, destBin)
 	if err := mvCmd.Run(); err != nil {
-		return fmt.Errorf("failed to move binary to destination: %w", err)
+		return err
 	}
 
 	// Capture all shared libraries from the build tree
@@ -175,7 +182,7 @@ func buildWhisper(binDir, destBin string) error {
 			continue
 		}
 		dest := filepath.Join(binDir, filepath.Base(lib))
-		log.Printf("Copying library: %s -> %s", lib, dest)
+		// Use cp -Pd to preserve symlinks
 		_ = exec.Command("cp", "-Pd", lib, dest).Run()
 	}
 
@@ -234,8 +241,6 @@ func handleTranscribe(w http.ResponseWriter, r *http.Request) {
 	modelPath := filepath.Join(home, "Dexter", "models", "whisper", "ggml-medium-distil.bin")
 
 	cmd := exec.Command(whisperBin, "-m", modelPath, "-f", audioPath, "-nt")
-
-	// Ensure we check local bin for shared libraries
 	cmd.Env = append(os.Environ(), fmt.Sprintf("LD_LIBRARY_PATH=%s:%s", binDir, os.Getenv("LD_LIBRARY_PATH")))
 
 	var out bytes.Buffer
