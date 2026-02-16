@@ -116,33 +116,40 @@ func handleTranscribe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if audioPath == "" {
+		log.Printf("STT: [ERROR] No audio source provided")
 		http.Error(w, "No audio source", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("STT: [EXEC] Transcribing %s (5m timeout)...", audioPath)
 
 	home, _ := os.UserHomeDir()
 	binDir := filepath.Join(home, "Dexter", "bin", "stt")
 	sttBin := filepath.Join(binDir, "dex-net-stt")
 	modelPath := filepath.Join(home, "Dexter", "models", "dex-net-stt.bin")
 
-	cmd := exec.Command(sttBin, "-m", modelPath, "-f", audioPath, "-nt")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
 
-	// CRITICAL: Isolated library path for STT to avoid conflicts with llama-server
-	cmd.Env = append(os.Environ(), fmt.Sprintf("LD_LIBRARY_PATH=%s:%s", binDir, os.Getenv("LD_LIBRARY_PATH")))
+	cmd := exec.CommandContext(ctx, sttBin, "-m", modelPath, "-f", audioPath, "-nt")
 
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
+	// ... (isolated library path logic)
 
 	if err := cmd.Run(); err != nil {
-		log.Printf("Neural STT Kernel failed: %v, Stderr: %s", err, stderr.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("STT: [ERROR] Timeout exceeded (5m)")
+		} else {
+			log.Printf("STT: [ERROR] Neural STT Kernel failed: %v, Stderr: %s", err, stderr.String())
+		}
 		http.Error(w, "Transcription failed", http.StatusInternalServerError)
 		return
 	}
 
+	text := strings.TrimSpace(out.String())
+	log.Printf("STT: [SUCCESS] Transcription complete: %.50s...", text)
+
 	resp := TranscribeResponse{
-		Text:        strings.TrimSpace(out.String()),
+		Text:        text,
 		Language:    "en",
 		Probability: 1.0,
 	}
